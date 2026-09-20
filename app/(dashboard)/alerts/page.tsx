@@ -1,0 +1,202 @@
+"use client";
+
+import React, { useEffect, useState } from "react";
+import { Badge } from "@/components/ui/Badge";
+import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { 
+  Bell, 
+  Battery, 
+  BatteryWarning,
+  MapPin, 
+  Navigation, 
+  CheckCircle2, 
+  Car,
+  Zap
+} from "lucide-react";
+import { Alert } from "@/types";
+import { api } from "@/lib/api";
+import { RoleGuard } from "@/components/layout/RoleGuard";
+
+export default function AlertsPage() {
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [resolving, setResolving] = useState<Set<string>>(new Set());
+  const pendingRef = React.useRef(new Set<string>());
+
+  const loadAlerts = React.useCallback(async () => {
+      setIsLoading(true);
+      setError("");
+      try {
+      const result = await api.alerts.list();
+      if (result.success) {
+        setAlerts(result.data.map((alert: any) => ({
+          ...alert,
+          vehicle_code: alert.vehicle_code || alert.vehicle_id || "Vehicle",
+          driver_name: alert.driver_name || alert.driver_id || "Unassigned",
+        })));
+        setError("");
+      } else {
+        setError(result.error || "Unable to load alerts");
+      }
+      } catch {
+        setError("Unable to load alerts. Please retry.");
+      } finally { setIsLoading(false); }
+  }, []);
+
+  useEffect(() => { void loadAlerts(); }, [loadAlerts]);
+
+  const resolveAlert = async (id: string) => {
+    if (pendingRef.current.has(id)) return;
+    pendingRef.current.add(id);
+    setResolving(new Set(pendingRef.current));
+    setError("");
+    try {
+    const result = await api.alerts.resolve(id);
+    if (result.success) {
+      setAlerts(prev => prev.map(a => a.id === id ? { ...a, is_resolved: true } : a));
+    } else {
+      setError(result.error || "Unable to resolve this alert. Please retry.");
+    }
+    } catch {
+      setError("Unable to resolve this alert. Please retry.");
+    } finally {
+      pendingRef.current.delete(id);
+      setResolving(new Set(pendingRef.current));
+    }
+  };
+
+  const getAlertIcon = (type: string) => {
+    switch (type) {
+      case "charging_opportunity": return Zap;
+      case "driver_risk": return BatteryWarning;
+      case "low_soc_parked": return Battery;
+      case "reroute": return Navigation;
+      default: return Bell;
+    }
+  };
+
+  const getAlertColor = (type: string) => {
+    switch (type) {
+      case "charging_opportunity": return "text-accent-teal border-accent-teal/30 bg-accent-teal/10";
+      case "driver_risk": return "text-accent-red border-accent-red/30 bg-accent-red/10";
+      case "low_soc_parked": return "text-accent-red border-accent-red/30 bg-accent-red/10";
+      case "reroute": return "text-accent-amber border-accent-amber/30 bg-accent-amber/10";
+      default: return "text-text-dim border-bg-border bg-bg-border/30";
+    }
+  };
+
+  return (
+    <RoleGuard allowedRoles={["trickee_admin", "fleet_operator", "driver"]}>
+    <div className="space-y-5 pb-12 sm:space-y-8">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="page-title mb-1">Real-time Alerts</h1>
+          <p className="text-text-dim">Actionable intelligence to optimize fleet range and uptime.</p>
+        </div>
+        <div className="flex w-fit items-center gap-2 rounded-xl border border-bg-border bg-bg-card px-4 py-2">
+           <span className="text-xs font-bold text-text-primary">{alerts.filter(a => !a.is_resolved).length} Unresolved</span>
+        </div>
+      </div>
+
+      <div className="max-w-3xl mx-auto space-y-4">
+        {error && (
+          <Card className="border-accent-red/30 bg-accent-red/5">
+            <p role="alert" className="text-sm text-accent-red">{error}</p>
+            <Button onClick={() => void loadAlerts()} disabled={isLoading || resolving.size > 0} variant="outline" className="mt-3">Retry alerts</Button>
+          </Card>
+        )}
+        {isLoading && <p role="status" className="py-6 text-text-dim">Loading alerts…</p>}
+
+        {alerts.map((alert) => {
+          const Icon = getAlertIcon(alert.alert_type);
+          const colorClass = getAlertColor(alert.alert_type);
+
+          return (
+            <Card 
+              key={alert.id} 
+              className={`transition-all duration-300 ${alert.is_resolved ? 'opacity-40 grayscale pointer-events-none' : 'hover:border-accent-teal/40'}`}
+            >
+              <div className="flex flex-col gap-4 sm:flex-row sm:gap-6">
+                <div className={`h-fit w-fit shrink-0 rounded-2xl border p-3 sm:p-4 ${colorClass}`}>
+                  <Icon className="w-6 h-6" />
+                </div>
+                
+                <div className="flex-1 space-y-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <Badge variant={alert.alert_type === "low_soc_parked" || alert.alert_type === "driver_risk" ? "error" : alert.alert_type === "reroute" ? "warning" : "info"}>
+                          {alert.alert_type.replace(/_/g, " ")}
+                        </Badge>
+                        <span className="text-[10px] text-text-dim uppercase font-bold tracking-widest">{new Date(alert.created_at).toLocaleTimeString()}</span>
+                      </div>
+                      <h3 className="flex flex-wrap items-center gap-2 text-base font-bold text-text-primary sm:text-lg">
+                        <Car className="w-4 h-4 text-text-dim" />
+                        {alert.vehicle_code}
+                        <span className="text-text-dim font-normal text-sm">/ {alert.driver_name}</span>
+                      </h3>
+                    </div>
+                    {alert.is_resolved && (
+                      <div className="flex items-center gap-1.5 text-accent-green text-xs font-bold uppercase tracking-widest">
+                        <CheckCircle2 className="w-4 h-4" />
+                        Resolved
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="text-sm text-text-primary leading-relaxed bg-bg-primary/50 p-4 rounded-xl border border-bg-border/30">
+                    {alert.message}
+                  </p>
+
+                  <div className="flex flex-col gap-4 pt-2 sm:flex-row sm:flex-wrap sm:gap-6">
+                    <div className="flex items-center gap-2">
+                      <Battery className="w-4 h-4 text-text-dim" />
+                      <div>
+                        <p className="text-[10px] text-text-dim uppercase font-bold tracking-tighter">SOC at Alert</p>
+                        <p className="text-sm font-mono font-bold text-text-primary">{alert.soc_at_alert}%</p>
+                      </div>
+                    </div>
+                    {alert.nearest_charger && (
+                      <div className="flex items-center gap-2">
+                        <MapPin className="w-4 h-4 text-text-dim" />
+                        <div>
+                          <p className="text-[10px] text-text-dim uppercase font-bold tracking-tighter">Nearest Charger</p>
+                          <p className="text-sm font-medium text-text-primary">{alert.nearest_charger} ({alert.charger_distance_m}m)</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {!alert.is_resolved && (
+                    <div className="flex justify-end pt-2">
+                      <Button 
+                        variant="secondary" 
+                        size="sm" 
+                        className="min-h-10 w-full gap-2 sm:w-auto"
+                        onClick={() => resolveAlert(alert.id)}
+                        isLoading={resolving.has(alert.id)}
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        Mark as Resolved
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
+          );
+        })}
+
+        {!isLoading && !error && alerts.length === 0 && (
+          <div className="text-center py-24 glass-card border-dashed">
+            <Bell className="w-12 h-12 text-bg-border mx-auto mb-4" />
+            <p className="text-text-dim">No active alerts. All systems nominal.</p>
+          </div>
+        )}
+      </div>
+    </div>
+    </RoleGuard>
+  );
+}

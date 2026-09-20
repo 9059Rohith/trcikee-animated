@@ -1,0 +1,730 @@
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import { RoleGuard } from "@/components/layout/RoleGuard";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/Table";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { AdminMetricCarousel } from "@/components/admin/AdminMetricCarousel";
+import { Activity, CheckCircle2, Cpu, Database, Layers, Settings, ShieldCheck, UserPlus, Users, XCircle, Zap } from "lucide-react";
+import { api } from "@/lib/api";
+import { AccessRequest, Driver, Fleet, ModelMetrics, User as TrickeeUser, UserRole, Vehicle } from "@/types";
+
+type Draft = {
+  role: UserRole;
+  fleet_id?: string;
+  driver_id?: string;
+  requested_vehicle_id?: string;
+};
+
+type UserMappingDraft = {
+  role: UserRole;
+  fleet_id?: string;
+  driver_id?: string;
+  full_name?: string;
+  is_active: boolean;
+};
+
+const roleOptions: { value: UserRole; label: string }[] = [
+  { value: "fleet_operator", label: "Fleet manager" },
+  { value: "driver", label: "Driver" },
+  { value: "trickee_admin", label: "Admin" },
+];
+
+function roleLabel(role: string) {
+  return roleOptions.find((option) => option.value === role)?.label || role.replace("_", " ");
+}
+
+function statusVariant(status: string): "success" | "error" | "warning" {
+  if (status === "approved") return "success";
+  if (status === "rejected") return "error";
+  return "warning";
+}
+
+function driverOptionLabel(driver: Driver) {
+  const code = driver.driver_code ? ` (${driver.driver_code})` : "";
+  const vehicle = driver.current_vehicle ? ` - ${driver.current_vehicle}` : "";
+  return `${driver.full_name}${code}${vehicle}`;
+}
+
+function vehicleOptionLabel(vehicle: Vehicle) {
+  return `${vehicle.vehicle_code}${vehicle.latest_driver?.full_name ? ` - ${vehicle.latest_driver.full_name}` : ""}`;
+}
+
+export default function AdminPage() {
+  const [modelMetrics, setModelMetrics] = useState<ModelMetrics | null>(null);
+  const [users, setUsers] = useState<TrickeeUser[]>([]);
+  const [accessRequests, setAccessRequests] = useState<AccessRequest[]>([]);
+  const [fleets, setFleets] = useState<Fleet[]>([]);
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [userDrafts, setUserDrafts] = useState<Record<string, UserMappingDraft>>({});
+  const [newRequest, setNewRequest] = useState({ email: "", full_name: "", company: "", requested_role: "fleet_operator" as UserRole, requested_vehicle_id: "" });
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [busyId, setBusyId] = useState("");
+
+  async function loadAdminData() {
+    setIsLoading(true);
+    const [metricsResult, usersResult, accessResult, fleetsResult, driversResult, vehiclesResult] = await Promise.all([
+      api.admin.metrics(),
+      api.admin.users(),
+      api.admin.accessRequests(),
+      api.admin.fleets(),
+      api.admin.drivers(),
+      api.vehicles.list(),
+    ]);
+    if (metricsResult.success) setModelMetrics(metricsResult.data);
+    if (usersResult.success) setUsers(usersResult.data);
+    if (accessResult.success) setAccessRequests(accessResult.data);
+    if (fleetsResult.success) setFleets(fleetsResult.data);
+    if (driversResult.success) setDrivers(driversResult.data);
+    if (vehiclesResult.success) setVehicles(vehiclesResult.data);
+    if (!metricsResult.success || !usersResult.success || !accessResult.success || !fleetsResult.success || !driversResult.success || !vehiclesResult.success) {
+      setError(metricsResult.error || usersResult.error || accessResult.error || fleetsResult.error || driversResult.error || vehiclesResult.error || "Unable to load admin data.");
+    } else {
+      setError("");
+    }
+    setIsLoading(false);
+  }
+
+  useEffect(() => {
+    loadAdminData();
+  }, []);
+
+  const counts = modelMetrics?.counts || {};
+  const model = modelMetrics?.model;
+  const modelName = model?.name || "Unavailable";
+  const featureCount = model?.feature_count || 0;
+  const servedPredictions = counts.predictions || 0;
+  const v5a = modelMetrics?.v5a_candidate;
+  const pendingRequests = accessRequests.filter((row) => row.status === "pending");
+  const reviewedRequests = accessRequests.filter((row) => row.status !== "pending");
+  const adminMetrics = [
+    {
+      label: "Model",
+      value: modelName,
+      helper: "Active model",
+      icon: Activity,
+      accentClass: "text-accent-teal",
+    },
+    {
+      label: "Model Status",
+      value: model?.ready ? "Ready" : "Not Ready",
+      helper: "Runtime state",
+      icon: Cpu,
+      accentClass: model?.ready ? "text-accent-green" : "text-accent-amber",
+    },
+    {
+      label: "Served Predictions",
+      value: servedPredictions.toLocaleString(),
+      helper: "Prediction volume",
+      icon: Zap,
+      accentClass: "text-accent-green",
+    },
+    {
+      label: "Requests",
+      value: pendingRequests.length.toLocaleString(),
+      helper: "Pending access",
+      icon: ShieldCheck,
+      accentClass: pendingRequests.length ? "text-accent-amber" : "text-accent-green",
+    },
+    {
+      label: "Features",
+      value: featureCount.toLocaleString(),
+      helper: "Signal count",
+      icon: Layers,
+      accentClass: "text-text-primary",
+    },
+  ];
+
+  const driversByFleet = useMemo(() => {
+    return drivers.reduce<Record<string, Driver[]>>((acc, driver) => {
+      const fleetId = driver.fleet_id || "none";
+      acc[fleetId] = [...(acc[fleetId] || []), driver];
+      return acc;
+    }, {});
+  }, [drivers]);
+
+  const vehiclesByFleet = useMemo(() => {
+    return vehicles.reduce<Record<string, Vehicle[]>>((acc, vehicle) => {
+      const fleetId = vehicle.fleet_id || "none";
+      acc[fleetId] = [...(acc[fleetId] || []), vehicle];
+      return acc;
+    }, {});
+  }, [vehicles]);
+
+  const fleetsById = useMemo(() => {
+    return fleets.reduce<Record<string, Fleet>>((acc, fleet) => {
+      acc[fleet.id] = fleet;
+      return acc;
+    }, {});
+  }, [fleets]);
+
+  const driversById = useMemo(() => {
+    return drivers.reduce<Record<string, Driver>>((acc, driver) => {
+      acc[driver.id] = driver;
+      return acc;
+    }, {});
+  }, [drivers]);
+
+  function draftFor(row: AccessRequest): Draft {
+    const role = row.requested_role || "driver";
+    const requestedVehicle = row.requested_vehicle_id ? vehicles.find((vehicle) => vehicle.id === row.requested_vehicle_id) : undefined;
+    const fleetId = role === "trickee_admin" ? undefined : requestedVehicle?.fleet_id || fleets[0]?.id;
+    const latestDriverId = requestedVehicle?.latest_driver?.id;
+    return drafts[row.id] || {
+      role,
+      fleet_id: fleetId,
+      driver_id: role === "driver" ? latestDriverId : undefined,
+      requested_vehicle_id: row.requested_vehicle_id,
+    };
+  }
+
+  function updateDraft(id: string, patch: Partial<Draft>) {
+    setDrafts((current) => {
+      const existing = current[id] || { role: "fleet_operator" as UserRole };
+      return { ...current, [id]: { ...existing, ...patch } };
+    });
+  }
+
+  function userDraftFor(user: TrickeeUser): UserMappingDraft {
+    return userDrafts[user.id] || {
+      role: user.role,
+      fleet_id: user.role === "trickee_admin" ? undefined : user.fleet_id,
+      driver_id: user.role === "driver" ? user.driver_id : undefined,
+      full_name: user.full_name,
+      is_active: user.is_active !== false,
+    };
+  }
+
+  function updateUserDraft(id: string, patch: Partial<UserMappingDraft>) {
+    setUserDrafts((current) => {
+      const user = users.find((row) => row.id === id);
+      const existing = current[id] || {
+        role: user?.role || "fleet_operator",
+        fleet_id: user?.fleet_id,
+        driver_id: user?.driver_id,
+        full_name: user?.full_name,
+        is_active: user?.is_active !== false,
+      };
+      return { ...current, [id]: { ...existing, ...patch } };
+    });
+  }
+
+  async function approve(row: AccessRequest) {
+    const draft = draftFor(row);
+    setBusyId(row.id);
+    setNotice("");
+    const result = await api.admin.approveAccessRequest(row.id, {
+      role: draft.role,
+      fleet_id: draft.role === "trickee_admin" ? undefined : draft.fleet_id,
+      driver_id: draft.role === "driver" ? draft.driver_id : undefined,
+      requested_vehicle_id: draft.role === "driver" ? draft.requested_vehicle_id : undefined,
+      full_name: row.full_name,
+    });
+    setBusyId("");
+    if (!result.success) {
+      setError(result.error || "Could not approve access.");
+      return;
+    }
+    setNotice("Access approved.");
+    await loadAdminData();
+  }
+
+  async function reject(row: AccessRequest) {
+    setBusyId(row.id);
+    setNotice("");
+    const result = await api.admin.rejectAccessRequest(row.id, { review_note: "Rejected from admin workspace" });
+    setBusyId("");
+    if (!result.success) {
+      setError(result.error || "Could not reject access.");
+      return;
+    }
+    setNotice("Request rejected.");
+    await loadAdminData();
+  }
+
+  async function saveUserMapping(user: TrickeeUser) {
+    const draft = userDraftFor(user);
+    setBusyId(user.id);
+    setNotice("");
+    setError("");
+    const result = await api.admin.updateUserMapping(user.id, {
+      role: draft.role,
+      fleet_id: draft.role === "trickee_admin" ? undefined : draft.fleet_id,
+      driver_id: draft.role === "driver" ? draft.driver_id : undefined,
+      full_name: draft.full_name?.trim() || user.full_name,
+      is_active: draft.is_active,
+    });
+    setBusyId("");
+    if (!result.success) {
+      setError(result.error || "Could not update user.");
+      return;
+    }
+    setNotice("User updated.");
+    setUserDrafts((current) => {
+      const next = { ...current };
+      delete next[user.id];
+      return next;
+    });
+    await loadAdminData();
+  }
+
+  async function createRequest(event: React.FormEvent) {
+    event.preventDefault();
+    setNotice("");
+    setError("");
+    const result = await api.admin.createAccessRequest({
+      email: newRequest.email.trim(),
+      full_name: newRequest.full_name.trim(),
+      company: newRequest.company.trim() || undefined,
+      requested_role: newRequest.requested_role,
+      requested_vehicle_id: newRequest.requested_role === "driver" ? newRequest.requested_vehicle_id || undefined : undefined,
+    });
+    if (!result.success) {
+      setError(result.error || "Could not add request.");
+      return;
+    }
+    setNotice("Request added.");
+    setNewRequest({ email: "", full_name: "", company: "", requested_role: "fleet_operator", requested_vehicle_id: "" });
+    await loadAdminData();
+  }
+
+  return (
+    <RoleGuard allowedRoles={["trickee_admin"]}>
+      <div className="space-y-8 pb-12">
+        <div>
+          <h1 className="page-title mb-1">Admin Console</h1>
+          <p className="text-text-dim">Model health, fleet data, and workspace access.</p>
+        </div>
+
+        {error && (
+          <Card className="border-accent-red/30 bg-accent-red/5">
+            <p className="text-sm text-accent-red">{error}</p>
+          </Card>
+        )}
+        {notice && (
+          <Card className="border-accent-green/30 bg-accent-green/5">
+            <p className="text-sm text-accent-green">{notice}</p>
+          </Card>
+        )}
+
+        <AdminMetricCarousel metrics={adminMetrics} />
+
+        <div className="grid grid-cols-1 gap-8 xl:grid-cols-[1fr_0.58fr]">
+          <Card>
+            <CardHeader className="flex-row items-center justify-between">
+              <div>
+                <CardTitle>Workspace Requests</CardTitle>
+                <CardDescription>Review and approve team access</CardDescription>
+              </div>
+              <ShieldCheck className="h-5 w-5 text-text-dim" />
+            </CardHeader>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Person</TableHead>
+                    <TableHead>Requested</TableHead>
+                    <TableHead>Access</TableHead>
+                    <TableHead>Team</TableHead>
+                    <TableHead>Map to driver profile</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {pendingRequests.map((row) => {
+                    const draft = draftFor(row);
+                    const fleetDrivers = draft.role === "driver" && draft.fleet_id ? driversByFleet[draft.fleet_id] || [] : [];
+                    const fleetVehicles = draft.role === "driver" && draft.fleet_id ? vehiclesByFleet[draft.fleet_id] || [] : [];
+                    return (
+                      <TableRow key={row.id}>
+                        <TableCell>
+                          <p className="font-medium text-text-primary">{row.full_name}</p>
+                          <p className="text-xs text-text-dim">{row.email}</p>
+                          {row.company && <p className="mt-1 text-[11px] text-text-dim">{row.company}</p>}
+                          {row.requested_role === "driver" && (
+                            <p className="mt-1 max-w-[210px] text-[10px] leading-4 text-accent-amber">
+                              Confirm this Gmail belongs to the rider before mapping it to telemetry.
+                            </p>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="warning">{roleLabel(row.requested_role)}</Badge>
+                          {row.requested_vehicle_id && (
+                            <p className="mt-1 text-[10px] leading-4 text-text-dim">
+                              Vehicle requested: {vehicles.find((vehicle) => vehicle.id === row.requested_vehicle_id)?.vehicle_code || row.requested_vehicle_id}
+                            </p>
+                          )}
+                          {row.requested_role === "fleet_operator" && (
+                            <p className="mt-1 text-[10px] leading-4 text-text-dim">User requested fleet access. Change below if this should be a driver account.</p>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <select
+                            value={draft.role}
+                            onChange={(event) =>
+                              updateDraft(row.id, {
+                                role: event.target.value as UserRole,
+                                driver_id: undefined,
+                                requested_vehicle_id: event.target.value === "driver" ? draft.requested_vehicle_id : undefined,
+                              })
+                            }
+                            className="h-9 w-full min-w-[135px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none"
+                          >
+                            {roleOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </TableCell>
+                        <TableCell>
+                          <select
+                            value={draft.fleet_id || ""}
+                            disabled={draft.role === "trickee_admin"}
+                            onChange={(event) => updateDraft(row.id, { fleet_id: event.target.value, driver_id: undefined, requested_vehicle_id: undefined })}
+                            className="h-9 w-full min-w-[150px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none disabled:opacity-45"
+                          >
+                            <option value="">Select team</option>
+                            {fleets.map((fleet) => (
+                              <option key={fleet.id} value={fleet.id}>
+                                {fleet.name}
+                              </option>
+                            ))}
+                          </select>
+                        </TableCell>
+                        <TableCell>
+                          {draft.role === "driver" ? (
+                            <>
+                              <select
+                                value={draft.requested_vehicle_id || ""}
+                                onChange={(event) => {
+                                  const vehicle = vehicles.find((row) => row.id === event.target.value);
+                                  updateDraft(row.id, {
+                                    requested_vehicle_id: event.target.value,
+                                    fleet_id: vehicle?.fleet_id || draft.fleet_id,
+                                    driver_id: vehicle?.latest_driver?.id,
+                                  });
+                                }}
+                                className="mb-2 h-9 w-full min-w-[170px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none"
+                              >
+                                <option value="">Select vehicle no</option>
+                                {fleetVehicles.map((vehicle) => (
+                                  <option key={vehicle.id} value={vehicle.id}>
+                                    {vehicleOptionLabel(vehicle)}
+                                  </option>
+                                ))}
+                              </select>
+                              <select
+                                value={draft.driver_id || ""}
+                                onChange={(event) => updateDraft(row.id, { driver_id: event.target.value })}
+                                className="h-9 w-full min-w-[145px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none"
+                              >
+                                <option value="">Select driver</option>
+                                {fleetDrivers.map((driver) => (
+                                  <option key={driver.id} value={driver.id}>
+                                    {driverOptionLabel(driver)}
+                                  </option>
+                                ))}
+                              </select>
+                              <p className="mt-1 max-w-[190px] text-[10px] leading-4 text-text-dim">
+                                Link this login to the existing telemetry driver record.
+                              </p>
+                              {!fleetDrivers.length && <p className="mt-1 text-[10px] text-accent-amber">No drivers in selected team.</p>}
+                            </>
+                          ) : (
+                            <p className="min-w-[145px] text-xs text-text-dim">Only required for Driver accounts.</p>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => approve(row)}
+                              disabled={busyId === row.id || (draft.role !== "trickee_admin" && !draft.fleet_id) || (draft.role === "driver" && !draft.driver_id)}
+                              isLoading={busyId === row.id}
+                              className="h-9 gap-1"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              Approve
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => reject(row)} disabled={busyId === row.id} className="h-9 gap-1 text-accent-red">
+                              <XCircle className="h-3.5 w-3.5" />
+                              Reject
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+              {!pendingRequests.length && (
+                <div className="p-7 text-sm text-text-dim">{isLoading ? "Loading requests..." : "No pending requests."}</div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Add Request</CardTitle>
+              <CardDescription>Prepare access for an invited team member</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={createRequest} className="space-y-4">
+                <input
+                  type="email"
+                  value={newRequest.email}
+                  onChange={(event) => setNewRequest((current) => ({ ...current, email: event.target.value }))}
+                  placeholder="name@company.com"
+                  className="h-10 w-full rounded-lg border border-bg-border bg-bg-primary px-3 text-sm text-text-primary outline-none"
+                  required
+                />
+                <input
+                  value={newRequest.full_name}
+                  onChange={(event) => setNewRequest((current) => ({ ...current, full_name: event.target.value }))}
+                  placeholder="Full name"
+                  className="h-10 w-full rounded-lg border border-bg-border bg-bg-primary px-3 text-sm text-text-primary outline-none"
+                  required
+                />
+                <input
+                  value={newRequest.company}
+                  onChange={(event) => setNewRequest((current) => ({ ...current, company: event.target.value }))}
+                  placeholder="Company or fleet"
+                  className="h-10 w-full rounded-lg border border-bg-border bg-bg-primary px-3 text-sm text-text-primary outline-none"
+                />
+                <select
+                  value={newRequest.requested_role}
+                  onChange={(event) =>
+                    setNewRequest((current) => ({
+                      ...current,
+                      requested_role: event.target.value as UserRole,
+                      requested_vehicle_id: event.target.value === "driver" ? current.requested_vehicle_id : "",
+                    }))
+                  }
+                  className="h-10 w-full rounded-lg border border-bg-border bg-bg-primary px-3 text-sm text-text-primary outline-none"
+                >
+                  {roleOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                {newRequest.requested_role === "driver" && (
+                  <select
+                    value={newRequest.requested_vehicle_id}
+                    onChange={(event) => setNewRequest((current) => ({ ...current, requested_vehicle_id: event.target.value }))}
+                    className="h-10 w-full rounded-lg border border-bg-border bg-bg-primary px-3 text-sm text-text-primary outline-none"
+                  >
+                    <option value="">Optional vehicle no hint</option>
+                    {vehicles.map((vehicle) => (
+                      <option key={vehicle.id} value={vehicle.id}>
+                        {vehicleOptionLabel(vehicle)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <Button type="submit" className="h-10 w-full gap-2">
+                  <UserPlus className="h-4 w-4" />
+                  Add request
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Data Profile</CardTitle>
+              <CardDescription>Current fleet and prediction coverage</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid grid-cols-2 gap-4">
+                {Object.entries(counts).map(([key, value]) => (
+                  <div key={key} className="rounded-lg border border-bg-border/30 bg-bg-primary/50 p-3">
+                    <p className="kpi-label">{key.replaceAll("_", " ")}</p>
+                    <p className="font-mono text-xl font-bold text-text-primary">{Number(value).toLocaleString()}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-8 border-t border-bg-border pt-6">
+                <div>
+                  <p className="kpi-label mb-2">Telemetry Rows</p>
+                  <div className="flex items-center gap-2">
+                    <Database className="h-4 w-4 text-text-dim" />
+                    <span className="text-sm font-bold text-text-primary">{Number(counts.telemetry || 0).toLocaleString()}</span>
+                  </div>
+                </div>
+                <div>
+                  <p className="kpi-label mb-2">Target</p>
+                  <div className="flex items-center gap-2">
+                    <Settings className="h-4 w-4 text-text-dim" />
+                    <span className="text-sm font-bold text-text-primary">{model?.target || "Unavailable"}</span>
+                  </div>
+                </div>
+              </div>
+              {v5a && (
+                <div className="rounded-lg border border-bg-border bg-bg-primary/40 p-4">
+                  <p className="kpi-label mb-2">Sequence Coverage</p>
+                  <p className="text-sm text-text-primary">
+                    Sequences: {v5a.sequences ?? "N/A"} | Raw rows: {v5a.raw_rows ?? "N/A"}
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex-row items-center justify-between">
+              <div>
+                <CardTitle>User Management</CardTitle>
+                <CardDescription>Approved workspace users</CardDescription>
+              </div>
+              <Users className="h-5 w-5 text-text-dim" />
+            </CardHeader>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>User</TableHead>
+                    <TableHead>Access</TableHead>
+                    <TableHead>Team</TableHead>
+                    <TableHead>Driver</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {users.map((user) => {
+                    const draft = userDraftFor(user);
+                    const fleetDrivers = draft.role === "driver" && draft.fleet_id ? driversByFleet[draft.fleet_id] || [] : [];
+                    const hasValidMapping = draft.role === "trickee_admin" || (draft.role === "fleet_operator" && !!draft.fleet_id) || (draft.role === "driver" && !!draft.fleet_id && !!draft.driver_id);
+                    return (
+                      <TableRow key={user.id}>
+                        <TableCell>
+                          <input
+                            value={draft.full_name || ""}
+                            onChange={(event) => updateUserDraft(user.id, { full_name: event.target.value })}
+                            className="mb-1 h-8 w-full min-w-[150px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs font-semibold text-text-primary outline-none"
+                          />
+                          <p className="text-xs text-text-dim">{user.email}</p>
+                          {user.driver_id && <p className="mt-1 text-[10px] text-text-dim">Current: {driversById[user.driver_id]?.full_name || user.driver_id}</p>}
+                        </TableCell>
+                        <TableCell>
+                          <select
+                            value={draft.role}
+                            onChange={(event) => {
+                              const role = event.target.value as UserRole;
+                              updateUserDraft(user.id, {
+                                role,
+                                fleet_id: role === "trickee_admin" ? undefined : draft.fleet_id,
+                                driver_id: role === "driver" ? draft.driver_id : undefined,
+                              });
+                            }}
+                            className="h-9 w-full min-w-[130px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none"
+                          >
+                            {roleOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </TableCell>
+                        <TableCell>
+                          <select
+                            value={draft.fleet_id || ""}
+                            disabled={draft.role === "trickee_admin"}
+                            onChange={(event) => updateUserDraft(user.id, { fleet_id: event.target.value, driver_id: undefined })}
+                            className="h-9 w-full min-w-[145px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none disabled:opacity-45"
+                          >
+                            <option value="">Select team</option>
+                            {fleets.map((fleet) => (
+                              <option key={fleet.id} value={fleet.id}>
+                                {fleet.name}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="mt-1 text-[10px] text-text-dim">{draft.role === "trickee_admin" ? "Global access" : fleetsById[draft.fleet_id || ""]?.name || "Team required"}</p>
+                        </TableCell>
+                        <TableCell>
+                          {draft.role === "driver" ? (
+                            <select
+                              value={draft.driver_id || ""}
+                              onChange={(event) => updateUserDraft(user.id, { driver_id: event.target.value })}
+                              className="h-9 w-full min-w-[155px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none"
+                            >
+                              <option value="">Select driver</option>
+                              {fleetDrivers.map((driver) => (
+                                <option key={driver.id} value={driver.id}>
+                                  {driverOptionLabel(driver)}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <p className="min-w-[125px] text-xs text-text-dim">Not required</p>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <select
+                            value={draft.is_active ? "active" : "inactive"}
+                            onChange={(event) => updateUserDraft(user.id, { is_active: event.target.value === "active" })}
+                            className="h-9 w-full min-w-[95px] rounded-lg border border-bg-border bg-bg-primary px-2 text-xs text-text-primary outline-none"
+                          >
+                            <option value="active">Active</option>
+                            <option value="inactive">Inactive</option>
+                          </select>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex justify-end">
+                            <Button
+                              size="sm"
+                              onClick={() => saveUserMapping(user)}
+                              disabled={busyId === user.id || !hasValidMapping}
+                              isLoading={busyId === user.id}
+                              className="h-9 gap-1"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              Update
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+              {!users.length && <div className="p-6 text-sm text-text-dim">No users available.</div>}
+            </CardContent>
+          </Card>
+        </div>
+
+        {!!reviewedRequests.length && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Recent Reviews</CardTitle>
+              <CardDescription>Completed access decisions</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {reviewedRequests.slice(0, 9).map((row) => (
+                <div key={row.id} className="rounded-lg border border-bg-border bg-bg-primary/45 p-4">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="truncate text-sm font-semibold text-text-primary">{row.full_name}</p>
+                    <Badge variant={statusVariant(row.status)}>{row.status}</Badge>
+                  </div>
+                  <p className="truncate text-xs text-text-dim">{row.email}</p>
+                  <p className="mt-2 text-xs text-text-dim">{roleLabel(row.requested_role)}</p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    </RoleGuard>
+  );
+}
